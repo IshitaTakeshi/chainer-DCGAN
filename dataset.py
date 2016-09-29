@@ -10,6 +10,7 @@ from tqdm import tqdm
 def load(path, image_shape):
     image = imread(path)
     image = imresize(image, image_shape)
+    image = (image - 128.) / 128.  # TODO make sure -1 <= image <= 1
     image = image.astype(np.float32).transpose(2, 0, 1)
     return image
 

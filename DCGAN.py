@@ -22,6 +22,8 @@ import chainer.links as L
 from tqdm import tqdm
 from dataset import load_images
 
+xp = cuda.cupy
+
 image_shape = (96, 96)
 
 image_dir = join(os.getenv("HOME"), ".julia", "v0.4", "ClothingRecommender",
@@ -38,27 +40,32 @@ image_save_interval = 50000
 
 # read all images
 
+zvis = (xp.random.uniform(-1, 1, (100, nz), dtype=np.float32))
+
+
+def generate_and_save(filename, x):
+    pylab.rcParams['figure.figsize'] = (16.0, 16.0)
+    pylab.clf()
+
+    for i in range(100):
+        image = ((np.clip(x[i, :, :, :], -1, 1) + 1) / 2.)
+        image = image.transpose(1, 2, 0)
+        pylab.subplot(10, 10, i + 1)
+        pylab.imshow(image)
+        pylab.axis('off')
+    pylab.savefig(filename)
+
+
 @profile
 def generate_data(images):
-    data = np.zeros((batchsize, 3, *image_shape), dtype=np.float32)
-    for j in range(batchsize):
-        try:
-            rnd = np.random.randint(0, len(images))
-            rnd2 = np.random.randint(2)
-            img = images[rnd]
-            if rnd2 == 0:
-                data[j, :, :, :] = (img[:, :, ::-1] - 128.) / 128.
-            else:
-                data[j, :, :, :] = (img[:, :, :] - 128.) / 128.
-        except Exception as e:
-            print(e)
+    indices = np.random.randint(0, len(images), batchsize)
+    images = images[indices]
 
-    print("loaded")
-    data = cuda.to_gpu(data)
-    print("moved")
-    data = Variable(data)
-    print("converted")
-    return data
+    data = np.zeros((batchsize, 3, *image_shape), dtype=np.float32)
+    p = np.random.randint(0, 2, batchsize)
+    data[p==0] = images[p==0][:, :, ::-1]
+    data[p==1] = images[p==1]
+    return Variable(cuda.to_gpu(data))
 
 
 class ELU(function.Function):
@@ -169,10 +176,6 @@ class Discriminator(chainer.Chain):
         return l
 
 
-def clip_img(x):
-    return np.float32(-1 if x < -1 else (1 if x > 1 else x))
-
-
 @profile
 def train_dcgan_labeled(images, gen, dis):
     o_gen = optimizers.Adam(alpha=0.0002, beta1=0.5)
@@ -182,20 +185,14 @@ def train_dcgan_labeled(images, gen, dis):
     o_gen.add_hook(chainer.optimizer.WeightDecay(0.00001))
     o_dis.add_hook(chainer.optimizer.WeightDecay(0.00001))
 
-    zvis = (xp.random.uniform(-1, 1, (100, nz), dtype=np.float32))
-
     zeros = Variable(xp.zeros(batchsize, dtype=np.int32))
     ones = Variable(xp.ones(batchsize, dtype=np.int32))
-    for epoch in tqdm(range(n_epoch)):
-        perm = np.random.permutation(n_train)
 
-        for i in range(0, n_train, batchsize):
+    for epoch in range(n_epoch):
+        for i in tqdm(range(0, n_train, batchsize)):
             # discriminator
             # 0: from dataset
             # 1: from noise
-
-            # print "load image start ", i
-            # print "load image done"
 
             # train generator
             z = xp.random.uniform(-1, 1, (batchsize, nz), dtype=np.float32)
@@ -206,12 +203,9 @@ def train_dcgan_labeled(images, gen, dis):
             L_dis = F.softmax_cross_entropy(yl, ones)
 
             # train discriminator
-
             x = generate_data(images)
-            yl2 = dis(x)
-            L_dis += F.softmax_cross_entropy(yl2, zeros)
-
-            # print "forward done"
+            yl = dis(x)
+            L_dis += F.softmax_cross_entropy(yl, zeros)
 
             o_gen.zero_grads()
             L_gen.backward()
@@ -221,25 +215,16 @@ def train_dcgan_labeled(images, gen, dis):
             L_dis.backward()
             o_dis.update()
 
-            # print "backward done"
-
-            if i % image_save_interval == 0:
-                pylab.rcParams['figure.figsize'] = (16.0, 16.0)
-                pylab.clf()
-                vissize = 100
+            if i % image_save_interval==0:
                 z = zvis
-                z[50:, :] = (
-                    xp.random.uniform(-1, 1, (50, nz), dtype=np.float32))
+                z[50:, :] = xp.random.uniform(-1, 1, (50, nz),
+                                              dtype=np.float32)
                 z = Variable(z)
                 x = gen(z, test=True)
-                x = x.data.get()
-                for i_ in range(100):
-                    tmp = ((np.vectorize(clip_img)(
-                        x[i_, :, :, :]) + 1) / 2).transpose(1, 2, 0)
-                    pylab.subplot(10, 10, i_ + 1)
-                    pylab.imshow(tmp)
-                    pylab.axis('off')
-                pylab.savefig('%s/vis_%d_%d.png' % (out_image_dir, epoch, i))
+
+                filename = '{}/vis_{}_{}.png'.format(out_image_dir, epoch, i)
+                generate_and_save(filename, x.data.get())
+
 
         serializers.save_hdf5("%s/dcgan_model_dis_%d.h5" %
                               (out_model_dir, epoch), dis)
@@ -252,7 +237,6 @@ def train_dcgan_labeled(images, gen, dis):
         exit(0)
 
 
-xp = cuda.cupy
 cuda.get_device(0).use()
 
 gen = Generator()
