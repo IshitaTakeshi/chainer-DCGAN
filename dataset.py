@@ -6,6 +6,8 @@ from scipy.misc import imresize
 from skimage.io import imread
 from tqdm import tqdm
 
+import cupy
+
 
 def load(path, image_shape):
     image = imread(path)
@@ -17,4 +19,4 @@ def load(path, image_shape):
 
 def load_images(image_dir, image_shape):
     paths = [join(image_dir, f) for f in os.listdir(image_dir)[:200]]
-    return np.array([load(path, image_shape) for path in tqdm(paths)])
+    return cupy.array([load(path, image_shape) for path in tqdm(paths)])

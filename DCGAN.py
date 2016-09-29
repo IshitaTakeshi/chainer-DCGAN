@@ -1,5 +1,5 @@
 import os
-from os.path import join
+from os.path import join, exists
 import math
 import pickle
 
@@ -22,21 +22,26 @@ import chainer.links as L
 from tqdm import tqdm
 from dataset import load_images
 
+
 xp = cuda.cupy
 
 image_shape = (96, 96)
 
 image_dir = join(os.getenv("HOME"), ".julia", "v0.4", "ClothingRecommender",
                  "dataset", "amebafurugiya", "data", "images", "full")
+
 out_image_dir = './out_images'
 out_model_dir = './out_models'
 
+if not exists(out_image_dir):
+    os.mkdir(out_image_dir)
+if not exists(out_model_dir):
+    os.mkdir(out_model_dir)
 
 nz = 100          # # of dim for Z
 batchsize = 100
 n_epoch = 10000
-n_train = 200000
-image_save_interval = 50000
+image_save_interval = 100
 
 # read all images
 
@@ -59,13 +64,14 @@ def generate_and_save(filename, x):
 @profile
 def generate_data(images):
     indices = np.random.randint(0, len(images), batchsize)
-    images = images[indices]
+    data = xp.empty((batchsize, 3, *image_shape), dtype=np.float32)
 
-    data = np.zeros((batchsize, 3, *image_shape), dtype=np.float32)
-    p = np.random.randint(0, 2, batchsize)
-    data[p==0] = images[p==0][:, :, ::-1]
-    data[p==1] = images[p==1]
-    return Variable(cuda.to_gpu(data))
+    for i, index in enumerate(indices):
+        if np.random.randint(0, 2) == 0:
+            data[i] = images[index][:, :, ::-1]
+        else:
+            data[i] = images[index]
+    return Variable(data)
 
 
 class ELU(function.Function):
@@ -188,53 +194,52 @@ def train_dcgan_labeled(images, gen, dis):
     zeros = Variable(xp.zeros(batchsize, dtype=np.int32))
     ones = Variable(xp.ones(batchsize, dtype=np.int32))
 
-    for epoch in range(n_epoch):
-        for i in tqdm(range(0, n_train, batchsize)):
-            # discriminator
-            # 0: from dataset
-            # 1: from noise
+    for epoch in tqdm(range(n_epoch)):
+        # discriminator
+        # 0: from dataset
+        # 1: from noise
 
-            # train generator
-            z = xp.random.uniform(-1, 1, (batchsize, nz), dtype=np.float32)
+        # train generator
+        z = xp.random.uniform(-1, 1, (batchsize, nz), dtype=np.float32)
+        z = Variable(z)
+        x = gen(z)
+        yl = dis(x)
+        L_gen = F.softmax_cross_entropy(yl, zeros)
+        L_dis = F.softmax_cross_entropy(yl, ones)
+
+        # train discriminator
+        x = generate_data(images)
+        yl = dis(x)
+        L_dis += F.softmax_cross_entropy(yl, zeros)
+
+        o_gen.zero_grads()
+        L_gen.backward()
+        o_gen.update()
+
+        o_dis.zero_grads()
+        L_dis.backward()
+        o_dis.update()
+
+        if epoch % image_save_interval == 0 and epoch > 0:
+            z = zvis
+            z[50:, :] = xp.random.uniform(-1, 1, (50, nz), dtype=np.float32)
             z = Variable(z)
-            x = gen(z)
-            yl = dis(x)
-            L_gen = F.softmax_cross_entropy(yl, zeros)
-            L_dis = F.softmax_cross_entropy(yl, ones)
+            x = gen(z, test=True)
 
-            # train discriminator
-            x = generate_data(images)
-            yl = dis(x)
-            L_dis += F.softmax_cross_entropy(yl, zeros)
+            filename = '{}/vis_{}.png'.format(out_image_dir, epoch)
+            generate_and_save(filename, x.data.get())
 
-            o_gen.zero_grads()
-            L_gen.backward()
-            o_gen.update()
+            path = join(out_model_dir, "dcgan_model_dis_{}.h5".format(epoch))
+            serializers.save_hdf5(path, dis)
 
-            o_dis.zero_grads()
-            L_dis.backward()
-            o_dis.update()
+            path = join(out_model_dir, "dcgan_model_gen_%d.h5".format(epoch))
+            serializers.save_hdf5(path, gen)
 
-            if i % image_save_interval==0:
-                z = zvis
-                z[50:, :] = xp.random.uniform(-1, 1, (50, nz),
-                                              dtype=np.float32)
-                z = Variable(z)
-                x = gen(z, test=True)
+            path = join(out_model_dir, "dcgan_state_dis_%d.h5".format(epoch))
+            serializers.save_hdf5(path, o_dis)
 
-                filename = '{}/vis_{}_{}.png'.format(out_image_dir, epoch, i)
-                generate_and_save(filename, x.data.get())
-
-
-        serializers.save_hdf5("%s/dcgan_model_dis_%d.h5" %
-                              (out_model_dir, epoch), dis)
-        serializers.save_hdf5("%s/dcgan_model_gen_%d.h5" %
-                              (out_model_dir, epoch), gen)
-        serializers.save_hdf5("%s/dcgan_state_dis_%d.h5" %
-                              (out_model_dir, epoch), o_dis)
-        serializers.save_hdf5("%s/dcgan_state_gen_%d.h5" %
-                              (out_model_dir, epoch), o_gen)
-        exit(0)
+            path = join(out_model_dir, "dcgan_state_gen_%d.h5".format(epoch))
+            serializers.save_hdf5(path, o_gen)
 
 
 cuda.get_device(0).use()
@@ -243,13 +248,6 @@ gen = Generator()
 dis = Discriminator()
 gen.to_gpu()
 dis.to_gpu()
-
-
-try:
-    os.mkdir(out_image_dir)
-    os.mkdir(out_model_dir)
-except:
-    pass
 
 images = load_images(image_dir, image_shape)
 train_dcgan_labeled(images, gen, dis)
